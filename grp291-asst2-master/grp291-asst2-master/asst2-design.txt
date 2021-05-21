@@ -1,0 +1,100 @@
+1. Overview of data structure
+Our implementation consists of a
+per-process file descriptor table and a global open file table. 
+
+The global open file table is an array of type "oft_struct", a
+custom data structure which 
+contains 4 attributes:
+1)'curr_offset'
+(off_t): the byte offset to operate on the opened file.
+2)'ref_counter'
+(int): the number of file descriptors that points to the opened file.
+3)'flags' (int): the flags related to the opened file, such as O_RDONLY.
+4)'node' (struct vnode *): the vnode for the opened file.
+This table is
+shared between processes.
+
+The per-process table is a simple integer
+array, file descriptors are indexes to this per-process 
+table, and
+table lookups will give you the index to the global file table.
+
+2. Implementation details
+There were no significant issues in managing
+the data structures and their states or issues.
+Though issues related to transferring data to and from applications were
+encoutered, we managed to solve them by using copyin/copyinstr or the uio 
+framework to safely transfer data from applications into and out of the kernel.
+
+These are the implementation details for
+each of the syscalls assuming valid input, invalid input
+would return
+an error corresponding to the syscall's respective man page 
+
+open()
+Finds the first available index in the per-process table and global
+table, and then invokes 
+vfs_open(), setting ref_counter to 1, setting
+curr_offset to 0, storing the vnode from 
+vfs_open and saving the
+flags it was given on the index of the global table. On the index
+of the per-process table, just set the value to the index of the
+global table. Precaution 
+has been taken on the filename received,
+using copyinstr to safely obtain the filename from
+the user pointer.
+
+close()
+sets value for the given file descriptor in the per-process table
+to -1 and decrement the 
+ref_counter on the global open file table
+which the given file descriptor points to, if 
+ref_counter becomes 0,
+call vfs_close to close the vnode and reset curr_offset,ref_counter,
+flags and node of that index.
+
+read()
+First perform fd validation, then reads the file on the global table
+which the given fd points to using VOP_READ and uio framework. 
+Updates curr_offset accordingly or returns the relevant error
+code if necessary.
+
+write()
+First perform fd validatio, then writes to the file on the global table
+which the given fd points to using VOP_WRITE and the uio framework.
+Updates curr_offset accordingly or returns the relevant error
+code if necessary.
+
+dup2()
+copies the pointer to the global table of oldfd on the per-process
+table to newfd and 
+increment the ref_counter to the index which
+oldfd points to global table.
+
+lseek()
+First perform fd validatio, then updates the curr_offset on the global
+table which the given fd points to, according to specfied 'whence'.
+Returns relevant error if there is any.
+
+3. Concurrency considerations
+Currently, the implementation works
+assuming no concurrency issues. However, with fork and 
+multithreaded
+systems race conditions would occur on the global open file table, such
+as 2 dup2()
+system calls pointing to the same index on the global open
+file table, both reading a 
+ref_counter = 2 and incrementing it to 3,
+when the actual value should be 4. 
+Similarly, if fork() was implemented, there would be race conditions between the
+parent and the child since they both refer to the same file pointer. 
+Specifically, for example, when both the parent and child are writing to
+a file, the output could be interleaved due to race conditions between the two threads;
+and the offset in the file pointer might not be updated correctly as well.
+This is one example
+of plenty race conditions which can occur, write(), read() and lseek() 
+can have race conditions with the curr_offset. A fix would be a mutex 
+lock on the entire global open file table which would lead to the file 
+system being slow. Alternatively, having a mutex lock for each index in
+the global table would speed up the file system, but use up more memory.
+
